@@ -1,20 +1,142 @@
-// src/components/EngineDashboard.js
-import React from 'react';
-import useROSSubscription from '../useROSSubscription';
-import useROSPublisher from '../useROSPublisher';
+import React, { useMemo, useState } from 'react';
 import GaugeComponent from 'react-gauge-component';
-import EngineDataDumpPanel from './EngineDataDumpPanel';
-import GenericActionExecutor from './GenericActionExecutor';
-import PumpTestPanel from './PumpTestPanel';
-import ros from '../rosConnection';
 import * as ROSLIB from 'roslib';
-import { useState } from 'react';
+import ros from '../rosConnection';
+import useROSSubscription from '../useROSSubscription';
+
+const TEMP_FIELD_HINTS = ['temp', 'temperature', 'egt', 'therm'];
+const THROAT_FIELD_CANDIDATES = [
+  'throat_area',
+  'throatArea',
+  'nozzle_throat_area',
+  'nozzleThroatArea',
+];
+const PRESSURE_SENSOR_1_CANDIDATES = [
+  'pressure_1',
+  'pressure1',
+  'pressure_sensor_1',
+  'pressureSensor1',
+  'sensor_1_pressure',
+  'sensor1Pressure',
+  'p1',
+  'engine_box_pressure',
+];
+const PRESSURE_SENSOR_2_CANDIDATES = [
+  'pressure_2',
+  'pressure2',
+  'pressure_sensor_2',
+  'pressureSensor2',
+  'sensor_2_pressure',
+  'sensor2Pressure',
+  'p2',
+];
+
+const GENERIC_TEMP_SENSORS = Array.from({ length: 12 }, (_, index) => ({
+  label: `Temp ${index + 1}`,
+  candidates: [
+    `temp_${index + 1}`,
+    `temp${index + 1}`,
+    `temperature_${index + 1}`,
+    `temperature${index + 1}`,
+    `sensor_${index + 1}_temp`,
+    `sensor${index + 1}Temp`,
+    `thermocouple_${index + 1}`,
+    `thermocouple${index + 1}`,
+    `tc_${index + 1}`,
+    `tc${index + 1}`,
+    `t_${index + 1}`,
+    `t${index + 1}`,
+  ],
+}));
+
+const getNumericValue = (source, candidates) => {
+  if (!source) {
+    return null;
+  }
+
+  for (const candidate of candidates) {
+    const value = source[candidate];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return null;
+};
+
+const getAnyNumericValue = (sources, candidates) => {
+  for (const source of sources) {
+    const value = getNumericValue(source, candidates);
+    if (value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+};
+
+const discoverTemperatureFields = (sources) => {
+  const discovered = [];
+
+  sources.forEach((source) => {
+    if (!source) {
+      return;
+    }
+
+    Object.entries(source).forEach(([key, value]) => {
+      const normalizedKey = key.toLowerCase();
+      const isTemperatureField = TEMP_FIELD_HINTS.some((hint) => normalizedKey.includes(hint));
+
+      if (
+        isTemperatureField &&
+        typeof value === 'number' &&
+        Number.isFinite(value) &&
+        !discovered.some((field) => field.key === key)
+      ) {
+        discovered.push({
+          key,
+          value,
+        });
+      }
+    });
+  });
+
+  return discovered;
+};
+
+const formatNumber = (value, digits = 0) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--';
+  }
+
+  return value.toFixed(digits);
+};
+
+const formatTemperature = (value) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--';
+  }
+
+  return `${value.toFixed(0)} C`;
+};
+
+const formatPressure = (value) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--';
+  }
+
+  if (value >= 1000) {
+    const scaledValue = value / 1000;
+    return Number.isInteger(scaledValue) ? `${scaledValue.toFixed(0)} bar` : `${scaledValue.toFixed(1)} bar`;
+  }
+
+  return `${value.toFixed(0)} mbar`;
+};
 
 const EngineDashboard = () => {
   const engineData = useROSSubscription('/h20pro/engine_data', 'interfaces/msg/EngineData');
   const pumpRpm = useROSSubscription('/h20pro/pump_rpm', 'interfaces/msg/engine_data2');
   const throttle = useROSSubscription('/h20pro/throttle_command', 'std_msgs/msg/Float32');
-  const errors = useROSSubscription('/h20pro/errors', 'interfaces/msg/Errors');
   const fuelAmbient = useROSSubscription('/h20pro/fuel_ambient', 'interfaces/msg/FuelAmbient');
   const glowPlugs = useROSSubscription('/h20pro/glow_plugs', 'interfaces/msg/GlowPlugs');
   const lastRunInfo = useROSSubscription('/h20pro/last_run_info', 'interfaces/msg/LastRunInfo');
@@ -24,631 +146,599 @@ const EngineDashboard = () => {
   const systemInfo2 = useROSSubscription('/h20pro/system_info2', 'interfaces/msg/PumpRpm');
   const voltageCurrent = useROSSubscription('/h20pro/voltage_current', 'interfaces/msg/VoltageCurrent');
 
-  var throttlePublisher = new ROSLIB.Topic({
-    ros: ros,
+  const telemetrySources = useMemo(
+    () => [engineData, fuelAmbient, glowPlugs, lastRunInfo, ngReg, statistics, systemInfo, systemInfo2, voltageCurrent, pumpRpm],
+    [engineData, fuelAmbient, glowPlugs, lastRunInfo, ngReg, statistics, systemInfo, systemInfo2, voltageCurrent, pumpRpm]
+  );
+
+  const throttlePublisher = new ROSLIB.Topic({
+    ros,
     name: '/h20pro/throttle_command',
     messageType: 'std_msgs/msg/Float32',
   });
-  /*
-    engine_data_pub_ = this->create_publisher<interfaces::msg::EngineData>("/h20pro/engine_data", 10);
-    engine2_data_pub_ = this->create_publisher<interfaces::msg::PumpRpm>("/h20pro/engine_data2", 10);
-    errors_current_pub_ = this->create_publisher<interfaces::msg::Errors>("/h20pro/errors", 10);
-    fuel_ambient_pub_ = this->create_publisher<interfaces::msg::FuelAmbient>("/h20pro/fuel_ambient", 10);
-    glow_plugs_pub_ = this->create_publisher<interfaces::msg::GlowPlugs>("/h20pro/glow_plugs", 10);
-    last_run_info_pub_ = this->create_publisher<interfaces::msg::LastRunInfo>("/h20pro/last_run_info", 10);
-    ng_reg_pub_ = this->create_publisher<interfaces::msg::NgReg>("/h20pro/ng_reg", 10);
-    statistics_pub_ = this->create_publisher<interfaces::msg::Statistics>("/h20pro/statistics", 10);
-    system_info_pub_ = this->create_publisher<interfaces::msg::SystemInfo>("/h20pro/system_info", 10);
-    system_info2_pub_ = this->create_publisher<interfaces::msg::SystemInfo2>("/h20pro/system_info2", 10);
-    voltage_current_pub_ = this->create_publisher<interfaces::msg::VoltageCurrent>("/h20pro/voltage_current", 10);
-  */
 
-  // Decode engineData
-  const rpm = engineData ? engineData.real_rpm : 0;
-  const egt = engineData ? engineData.egt : 0;
-  const stateName = engineData ? engineData.state_name : 'UNKNOWN';
-
-  // Decode pumpRpm
-  const pump_rpm = pumpRpm ? pumpRpm.pump_rpm : 0;
-
-  // Decode voltateCurrent
-  const batteryVoltage = voltageCurrent ? voltageCurrent.battery_voltage : 0;
-  const batteryCurrent = voltageCurrent ? voltageCurrent.battery_current : 0;
-
-  // Decode errors
-  const errorsList = errors ? errors.errors : [];
-  const resetRequired = errors ? errors.reset_required : false;
-
-  // Decode fuelAmbient
-  const fuelFlow = fuelAmbient ? fuelAmbient.fuel_flow : 0;
-  const fuelConsumed = fuelAmbient ? fuelAmbient.fuel_consumed : 0;
-  const engineBoxPressure = fuelAmbient ? fuelAmbient.engine_box_pressure : 0;
-  const ambientTemperature = fuelAmbient ? fuelAmbient.ambient_temperature : 0;
-
-  // Decode glowPlugs
-  const GP1_V = glowPlugs ? glowPlugs.glow_plug_v[0] : 0;
-  const GP2_V = glowPlugs ? glowPlugs.glow_plug_v[1] : 0;
-  const GP1_I = glowPlugs ? glowPlugs.glow_plug_i[0] : 0;
-  const GP2_I = glowPlugs ? glowPlugs.glow_plug_i[1] : 0;  
-
-
-  // New subscriptions / values for the right column gauges:
-  const glowPlug1Voltage = engineData ? engineData.glowplug1_voltage : 0;
-  const glowPlug1Current = engineData ? engineData.glowplug1_current : 0;
-  const glowPlug2Voltage = engineData ? engineData.glowplug2_voltage : 0;
-  const glowPlug2Current = engineData ? engineData.glowplug2_current : 0;
-
-
-  const throttle_command = throttle ? throttle.data : 0;
-
-  var primeAction = new ROSLIB.Action({
-    ros: ros,
+  const primeAction = new ROSLIB.Action({
+    ros,
     name: '/h20pro/prime',
     actionType: 'interfaces/action/Prime',
     timeout: 5,
   });
 
-  var startAction = new ROSLIB.Action({
-    ros: ros,
+  const startAction = new ROSLIB.Action({
+    ros,
     name: '/h20pro/start',
     actionType: 'interfaces/action/Start',
     timeout: 5,
   });
 
-  var starterTestAction = new ROSLIB.Action({
-    ros: ros,
+  const starterTestAction = new ROSLIB.Action({
+    ros,
     name: '/h20pro/starter_test',
     actionType: 'interfaces/action/StarterTest',
     timeout: 5,
   });
 
-  // All data from ROS2 has been decoded at this point
-  // The rest is just
-
-  const formatRPMtick = (value) => {
-    if (value >= 1000) {
-      value = value / 1000;
-      if (Number.isInteger(value)) {
-        return value.toFixed(0) + 'k';
-      } else {
-        return value.toFixed(1) + 'k';
-      }
-    } else {
-      return value.toFixed(0);
-    }
-  };
-
-  const formatRPM = (value) => {
-    return formatRPMtick(value);
-  };
-
-  const formatPressure = (value) => {
-    // do the same conversion to thousands as the rpm
-      value = value / 1000;
-      if (Number.isInteger(value)) {
-        return value.toFixed(0) + ' bar';
-      } else {
-        return value.toFixed(1) + ' bar';
-      }
-  };
-
-  const [isRunningStartTest, setIsRunningStartTest] = useState(false);
-  const [startTestButtonText, setStartTestButtonText] = useState('Start Test');
-
-  const startTestButton = () => {
-    console.log("Start Test Button Clicked");
-
-    var goal = {};
-
-    setIsRunningStartTest(true);
-    setStartTestButtonText('Running Test...');
-    var goal_id = starterTestAction.sendGoal(goal,
-    function(result) {
-      console.log(result);
-      setIsRunningStartTest(false);
-      setStartTestButtonText('Start Test');
-    },
-    function(feedback) {
-      console.log(feedback);
-    },
-    );
-    console.log(goal_id);
-  };
-
-  const [isPriming, setIsPriming] = useState(false);
-  const [primeButtonText, setPrimeButtonText] = useState('Prime');
-
-  const primeButton = () => {
-    console.log("Prime Button Clicked");
-    var goal = {
-      pump_power_percent: 10
-    };
-
-    setIsPriming(true);
-    setPrimeButtonText('Priming...');
-    var goal_id = primeAction.sendGoal(goal, 
-    function(result) {
-      console.log(result);
-      setIsPriming(false);
-      setPrimeButtonText('Prime');
-    },
-    function(feedback) {
-      console.log(feedback);
-    },
-    );
-  };
-
-  const [isStarting, setIsStarting] = useState(false);
-  const [startButtonText, setStartButtonText] = useState('Start');
-
-  const startButton = () => {
-    console.log("Start Button Clicked");
-    var goal = {};
-
-    setIsStarting(true);
-    setStartButtonText('Starting...');
-    var goal_id = startAction.sendGoal(goal, 
-    function(result) {
-      console.log(result);
-      setIsStarting(false);
-      setStartButtonText('Start');
-    },
-    function(feedback) {
-      console.log(feedback);
-    },
-    );
-  };
-
-  const [isKilling, setIsKilling] = useState(false);
-  const [killButtonText, setKillButtonText] = useState('Kill Engine');
-
   const killService = new ROSLIB.Service({
-    ros: ros,
+    ros,
     name: '/h20pro/kill',
     serviceType: 'std_srvs/srv/Trigger',
   });
 
-  const killEngine = () => {
-    console.log("Kill Engine Button Clicked");
-    var request = {};
+  const stateName = engineData ? engineData.state_name : 'UNKNOWN';
+  const fuelFlow = fuelAmbient ? fuelAmbient.fuel_flow : 0;
+  const fuelConsumed = fuelAmbient ? fuelAmbient.fuel_consumed : 0;
+  const ambientTemperature = fuelAmbient ? fuelAmbient.ambient_temperature : null;
+  const engineBoxPressure = fuelAmbient ? fuelAmbient.engine_box_pressure : 0;
+  const throttleCommand = throttle ? throttle.data : 0;
+  const throatArea = getAnyNumericValue(telemetrySources, THROAT_FIELD_CANDIDATES);
+  const pressureSensor1 = getAnyNumericValue(telemetrySources, PRESSURE_SENSOR_1_CANDIDATES) ?? engineBoxPressure;
+  const pressureSensor2 = getAnyNumericValue(telemetrySources, PRESSURE_SENSOR_2_CANDIDATES);
 
+  const discoveredTemperatureFields = useMemo(
+    () => discoverTemperatureFields(telemetrySources),
+    [telemetrySources]
+  );
+
+  const temperatureSensors = useMemo(() => {
+    const assignedKeys = new Set();
+    const sensorValues = [
+      {
+        label: 'Temp 1',
+        value: engineData && typeof engineData.egt === 'number' ? engineData.egt : null,
+      },
+      {
+        label: 'Temp 2',
+        value: ambientTemperature,
+      },
+    ];
+
+    discoveredTemperatureFields.forEach((field) => {
+      if (field.key === 'egt' || field.key === 'ambient_temperature') {
+        assignedKeys.add(field.key);
+      }
+    });
+
+    GENERIC_TEMP_SENSORS.slice(2).forEach((sensor) => {
+      const directValue = getAnyNumericValue(telemetrySources, sensor.candidates);
+      const directKey = sensor.candidates.find((candidate) =>
+        telemetrySources.some((source) => source && typeof source[candidate] === 'number' && Number.isFinite(source[candidate]))
+      );
+
+      if (directKey) {
+        assignedKeys.add(directKey);
+      }
+
+      const fallbackField = discoveredTemperatureFields.find((field) => !assignedKeys.has(field.key));
+
+      if (fallbackField) {
+        assignedKeys.add(fallbackField.key);
+      }
+
+      sensorValues.push({
+        label: sensor.label,
+        value: directValue ?? fallbackField?.value ?? null,
+      });
+    });
+
+    return sensorValues.slice(0, 12);
+  }, [ambientTemperature, discoveredTemperatureFields, engineData, telemetrySources]);
+
+  const [isRunningStartTest, setIsRunningStartTest] = useState(false);
+  const [startTestButtonText, setStartTestButtonText] = useState('Start Test');
+  const [isPriming, setIsPriming] = useState(false);
+  const [primeButtonText, setPrimeButtonText] = useState('Prime');
+  const [isStarting, setIsStarting] = useState(false);
+  const [startButtonText, setStartButtonText] = useState('Start');
+  const [isKilling, setIsKilling] = useState(false);
+  const [killButtonText, setKillButtonText] = useState('Kill Engine');
+  const [throttleValue, setThrottleValue] = useState(0);
+
+  const startTestButton = () => {
+    setIsRunningStartTest(true);
+    setStartTestButtonText('Running Test...');
+
+    starterTestAction.sendGoal(
+      {},
+      () => {
+        setIsRunningStartTest(false);
+        setStartTestButtonText('Start Test');
+      },
+      (feedback) => {
+        console.log(feedback);
+      }
+    );
+  };
+
+  const primeButton = () => {
+    setIsPriming(true);
+    setPrimeButtonText('Priming...');
+
+    primeAction.sendGoal(
+      { pump_power_percent: 10 },
+      () => {
+        setIsPriming(false);
+        setPrimeButtonText('Prime');
+      },
+      (feedback) => {
+        console.log(feedback);
+      }
+    );
+  };
+
+  const startButton = () => {
+    setIsStarting(true);
+    setStartButtonText('Starting...');
+
+    startAction.sendGoal(
+      {},
+      () => {
+        setIsStarting(false);
+        setStartButtonText('Start');
+      },
+      (feedback) => {
+        console.log(feedback);
+      }
+    );
+  };
+
+  const killEngine = () => {
     setIsKilling(true);
     setKillButtonText('Killing...');
-    killService.callService(request, function(result) {
-      console.log(result);
+
+    killService.callService({}, () => {
       setIsKilling(false);
       setKillButtonText('Kill Engine');
     });
   };
-  //final button for killing the engine
 
-  const [throttleValue, setThrottleValue] = useState(0);
-
-  const handleThrottleChange = (e) => {
-    const newValue = parseFloat(e.target.value);
+  const handleThrottleChange = (event) => {
+    const newValue = parseFloat(event.target.value);
     setThrottleValue(newValue);
     throttlePublisher.publish({ data: newValue });
   };
 
-  // Dynamic style for the state header:
   const stateHeaderStyle = {
-    width: '100%',
-    padding: '2px',
-    textAlign: 'center',
-    fontSize: '50px',
-    fontFamily: 'MW Font',
-    fontWeight: 'bold',
-    color: stateName === 'RUNNING' ? 'green' : '#fff',
-  };
-
-  const primeButtonStyle = {
-    backgroundColor: '#2E8B57', // SeaGreen
-    color: isPriming ? '#fff' : '#000',
-    border: 'none',
-    borderRadius: '5px',
-    padding: '10px 20px',
-    fontSize: '20px',
-    fontFamily: 'MW Font',
-    fontWeight: 'bold',
-    cursor: 'crosshair',
-    position: 'relative',
-    zIndex: 1000,
-  };
-
-  const startButtonStyle = {
-    backgroundColor: '#2E8B57', // SeaGreen
-    color: isStarting ? '#fff' : '#000',
-    border: 'none',
-    borderRadius: '5px',
-    padding: '10px 20px',
-    fontSize: '20px',
-    fontFamily: 'MW Font',
-    fontWeight: 'bold',
-    cursor: 'crosshair',
-    position: 'relative',
-    zIndex: 1000,
-  };
-
-  const killButtonStyle = {
-    backgroundColor: '#8B0000', // DarkRed
-    color: isKilling ? '#fff' : '#000',
-    border: 'none',
-    borderRadius: '5px',
-    padding: '10px 20px',
-    fontSize: '20px',
-    fontFamily: 'MW Font',
-    fontWeight: 'bold',
-    cursor: 'crosshair',
-    position: 'relative',
-    zIndex: 1000
-  };
-
-  const startTestButtonStyle = {
-    backgroundColor: '#8B0000', // DarkRed
-    color: isRunningStartTest ? '#fff' : '#000',
-    border: 'none',
-    borderRadius: '5px',
-    padding: '10px 20px',
-    fontSize: '20px',
-    fontFamily: 'MW Font',
-    fontWeight: 'bold',
-    cursor: 'crosshair',
-    position: 'relative',
-    zIndex: 1000
+    ...cardTitleStyle,
+    fontSize: '42px',
+    textAlign: 'left',
+    color: stateName === 'RUNNING' ? '#73ff9d' : '#ffffff',
   };
 
   return (
     <div className="dashboard engine-dashboard" style={dashboardStyle}>
-      <div style={gridStyle}>
+      <div style={dashboardContentStyle}>
         <div style={columnStyle}>
-          {/* Left column elements */}
-          <button onClick={primeButton} disabled={isPriming} style={primeButtonStyle}>{primeButtonText}</button>
-          <button onClick={startButton} disabled={isStarting} style={startButtonStyle}>{startButtonText}</button>
-          <button onClick={killEngine} disabled={isKilling} style={killButtonStyle}>{killButtonText}</button>
-          <button onClick={startTestButton} disabled={isRunningStartTest} style={startTestButtonStyle}>{startTestButtonText}</button>
-          <input
-          type="range"
-          min="0"
-          max="100"
-          step="1"
-          value={throttleValue}
-          onChange={handleThrottleChange}
-          style={{ width: '100%', zIndex: 1000 }}
-          />
+          <div style={controlPanelStyle}>
+            <div style={controlPanelHeaderStyle}>Engine Controls</div>
+            <button onClick={primeButton} disabled={isPriming} style={primaryButtonStyle}>
+              {primeButtonText}
+            </button>
+            <button onClick={startButton} disabled={isStarting} style={primaryButtonStyle}>
+              {startButtonText}
+            </button>
+            <button onClick={killEngine} disabled={isKilling} style={dangerButtonStyle}>
+              {killButtonText}
+            </button>
+            <button onClick={startTestButton} disabled={isRunningStartTest} style={secondaryButtonStyle}>
+              {startTestButtonText}
+            </button>
+            <div style={sliderCardStyle}>
+              <div style={metricCardLabelStyle}>Throttle Command</div>
+              <div style={metricCardValueStyle}>{formatNumber(throttleCommand, 0)}%</div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={throttleValue}
+                onChange={handleThrottleChange}
+                style={sliderStyle}
+              />
+            </div>
+          </div>
         </div>
+
         <div style={centerColumnStyle}>
-          {/* Center column elements */}
-          <div style={stateHeaderStyle}>
-            {'State: ' + stateName}
-          </div>
-          <div style={centerGaugeGridStyle}>
-            {/* Top Left: RPM Gauge */}
-            <div style={gaugeContainerStyle}>
-              <div style={centerGaugeStyle}>
-                <GaugeComponent
-                  arc={{
-                    startAngle: 135,
-                    endAngle: 45,
-                    subArcs: [
-                      { limit: 6700, color: '#5BE12C', showTick: true },
-                      { limit: 37000, color: '#F5CD19', showTick: true },
-                      { limit: 125000, color: '#EA4228', showTick: true },
-                    ],
-                    width: 0.3,
-                    padding: 0.003,
-                  }}
-                  labels={{
-                    valueLabel: {
-                      style: valueLabelStyle,
-                      formatTextValue: formatRPM,
-                    },
-                    tickLabels: {
-                      type: "outer",
-                      defaultTickValueConfig: {
-                        formatTextValue: formatRPMtick,
-                        style: tickLabelStyle,
-                      },
-                      ticks: [
-                        { value: 45000 },
-                        { value: 55000 },
-                        { value: 65000 },
-                        { value: 75000 },
-                        { value: 85000 },
-                        { value: 95000 },
-                        { value: 105000 },
-                        { value: 115000 },
-                      ],
-                    },
-                  }}
-                  value={rpm}
-                  maxValue={125000}
-                  pointer={{ type: "arrow", elastic: true }}
-                />
+          <div style={headerCardStyle}>
+            <div style={stateHeaderStyle}>State: {stateName}</div>
+            <div style={stateMetaGridStyle}>
+              <div style={smallInfoCardStyle}>
+                <div style={smallInfoLabelStyle}>Fuel Consumed</div>
+                <div style={smallInfoValueStyle}>{formatNumber(fuelConsumed, 0)} mL</div>
               </div>
-              <div style={gaugeTitleStyle}>RPM</div>
+              <div style={smallInfoCardStyle}>
+                <div style={smallInfoLabelStyle}>Engine Box Pressure</div>
+                <div style={smallInfoValueStyle}>{formatPressure(engineBoxPressure)}</div>
+              </div>
+              <div style={smallInfoCardStyle}>
+                <div style={smallInfoLabelStyle}>Throat Area</div>
+                <div style={smallInfoValueStyle}>
+                  {throatArea !== null ? `${formatNumber(throatArea, 2)} mm^2` : '--'}
+                </div>
+              </div>
             </div>
-            {/* Top Right: EGT Gauge */}
-            <div style={gaugeContainerStyle}>
-              <div style={centerGaugeStyle}>
+          </div>
+
+          <div style={topTelemetryGridStyle}>
+            <div style={panelCardStyle}>
+              <div style={cardTitleStyle}>Pressure Sensor 1</div>
+              <div style={mediumGaugeStyle}>
                 <GaugeComponent
                   arc={{
+                    startAngle: 180,
+                    endAngle: 0,
                     subArcs: [
                       { limit: 1000, color: '#5BE12C', showTick: true },
-                      { limit: 2000, color: '#F5CD19', showTick: true },
+                      { limit: 2500, color: '#F5CD19', showTick: true },
                       { limit: 5000, color: '#EA4228', showTick: true },
                     ],
-                    width: 0.3,
+                    width: 0.25,
                     padding: 0.003,
                   }}
                   labels={{
                     valueLabel: {
-                      style: valueLabelStyle,
+                      style: mediumValueLabelStyle,
                       formatTextValue: formatPressure,
                     },
                     tickLabels: {
                       type: 'outer',
-                      ticks: [
-                        { value: 3000 },
-                        { value: 4000 },
-                      ],
                       defaultTickValueConfig: {
-                        style: tickLabelStyle,
-                        formatTextValue: formatPressure,
+                        formatTextValue: (value) => value.toFixed(0),
+                        style: mediumTickLabelStyle,
                       },
+                      ticks: [{ value: 1000 }, { value: 2000 }, { value: 3000 }, { value: 4000 }, { value: 5000 }],
                     },
                   }}
-                  value={engineBoxPressure}
+                  value={pressureSensor1 ?? 0}
                   maxValue={5000}
                 />
               </div>
-              <div style={gaugeTitleStyle}>Combustor Pressure</div>
             </div>
-            {/* Bottom Left: Engine Box Pressure Gauge */}
-            <div style={gaugeContainerStyle}>
-              <div style={centerGaugeStyle}>
+
+            <div style={panelCardStyle}>
+              <div style={cardTitleStyle}>Pressure Sensor 2</div>
+              <div style={mediumGaugeStyle}>
                 <GaugeComponent
                   arc={{
+                    startAngle: 180,
+                    endAngle: 0,
                     subArcs: [
                       { limit: 1000, color: '#5BE12C', showTick: true },
-                      { limit: 2000, color: '#F5CD19', showTick: true },
+                      { limit: 2500, color: '#F5CD19', showTick: true },
                       { limit: 5000, color: '#EA4228', showTick: true },
                     ],
-                    width: 0.3,
+                    width: 0.25,
                     padding: 0.003,
                   }}
                   labels={{
                     valueLabel: {
-                      style: valueLabelStyle,
+                      style: mediumValueLabelStyle,
                       formatTextValue: formatPressure,
                     },
                     tickLabels: {
                       type: 'outer',
-                      ticks: [
-                        { value: 3000 },
-                        { value: 4000 },
-                      ],
                       defaultTickValueConfig: {
-                        style: tickLabelStyle,
-                        formatTextValue: formatPressure,
+                        formatTextValue: (value) => value.toFixed(0),
+                        style: mediumTickLabelStyle,
                       },
+                      ticks: [{ value: 1000 }, { value: 2000 }, { value: 3000 }, { value: 4000 }, { value: 5000 }],
                     },
                   }}
-                  value={engineBoxPressure}
+                  value={pressureSensor2 ?? 0}
                   maxValue={5000}
                 />
               </div>
-              <div style={gaugeTitleStyle}>Combustor Pressure</div>
             </div>
-            {/* Bottom Right: Engine Box Temperature Gauge */}
-            <div style={gaugeContainerStyle}>
-              <div style={centerGaugeStyle}>
-                <GaugeComponent
-                  arc={{
-                    subArcs: [
-                      { limit: 22, color: '#5BE12C', showTick: true },
-                      { limit: 350, color: '#F5CD19', showTick: true },
-                      { limit: 1000, color: '#EA4228', showTick: true },
-                    ],
-                    width: 0.3,
-                    padding: 0.003,
-                  }}
-                  labels={{
-                    valueLabel: {
-                      style: valueLabelStyle,
-                      formatTextValue: (value) => value.toFixed(0) + ' °C',
-                    },
-                    tickLabels: {
-                      type: 'outer',
-                      ticks: [
-                        { value: 200 },
-                        { value: 450 },
-                        { value: 550 },
-                        { value: 650 },
-                        { value: 750 },
-                        { value: 850 },
-                        { value: 950 },
+
+            <div style={sideTelemetryStackStyle}>
+              <div style={panelCardStyle}>
+                <div style={cardTitleStyle}>Fuel Flow Rate</div>
+                <div style={mediumGaugeStyle}>
+                  <GaugeComponent
+                    arc={{
+                      startAngle: 180,
+                      endAngle: 0,
+                      subArcs: [
+                        { limit: 150, color: '#5BE12C', showTick: true },
+                        { limit: 300, color: '#F5CD19', showTick: true },
+                        { limit: 600, color: '#EA4228', showTick: true },
                       ],
-                      defaultTickValueConfig: {
-                        style: tickLabelStyle,
-                        formatTextValue: (value) => value.toFixed(0) + ' °C',
+                      width: 0.25,
+                      padding: 0.003,
+                    }}
+                    labels={{
+                      valueLabel: {
+                        style: mediumValueLabelStyle,
+                        formatTextValue: (value) => `${value.toFixed(0)} mL/min`,
                       },
-                    },
-                  }}
-                  value={ambientTemperature}
-                  maxValue={1000}
-                />
+                      tickLabels: {
+                        type: 'outer',
+                        defaultTickValueConfig: {
+                          style: mediumTickLabelStyle,
+                          formatTextValue: (value) => value.toFixed(0),
+                        },
+                        ticks: [{ value: 150 }, { value: 300 }, { value: 450 }, { value: 600 }],
+                      },
+                    }}
+                    value={fuelFlow}
+                    maxValue={600}
+                  />
+                </div>
               </div>
-              <div style={gaugeTitleStyle}>Combustor Temp</div>
             </div>
           </div>
-        </div>
-        <div style={columnStyle}>
-          {/*
-          {/* Right column elements */}
-          {/* Two larger battery gauges (half size of center gauges) */}
-          <div style={{ flex: '1' }}>
-          {/* Right column: Dump all data */}
-          <EngineDataDumpPanel
-            engineData={engineData}
-            pumpRpm={pumpRpm}
-            throttle={throttle}
-            errors={errors}
-            fuelAmbient={fuelAmbient}
-            glowPlugs={glowPlugs}
-            lastRunInfo={lastRunInfo}
-            ngReg={ngReg}
-            statistics={statistics}
-            systemInfo={systemInfo}
-            systemInfo2={systemInfo2}
-            voltageCurrent={voltageCurrent}
-          />
-        </div>
+
+          <div style={panelCardStyle}>
+            <div style={cardTitleStyle}>Temperature Sensors</div>
+            <div style={temperatureBarChartStyle}>
+              {temperatureSensors.map((sensor) => (
+                <div key={sensor.label} style={temperatureBarColumnStyle}>
+                  <div style={temperatureBarValueStyle}>{formatTemperature(sensor.value)}</div>
+                  <div style={temperatureBarTrackStyle}>
+                    <div
+                      style={{
+                        ...temperatureBarFillStyle,
+                        height: `${Math.max(4, Math.min(((sensor.value ?? 0) / 1200) * 100, 100))}%`,
+                        opacity: sensor.value !== null ? 1 : 0.3,
+                      }}
+                    />
+                  </div>
+                  <div style={temperatureBarLabelStyle}>{sensor.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-// Common styles for left/center column gauges
-const tickLabelStyle = {
-  fontSize: '20px',
-  color: '#fff',
-  fontFamily: 'MW Font',
-  fontWeight: 'bold',
-};
-
-const valueLabelStyle = {
-  fontSize: '40px',
-  color: '#fff',
-  fontFamily: 'MW Font',
-  fontWeight: 'bold',
-};
-
 const dashboardStyle = {
+  minHeight: '100vh',
   padding: '20px',
+  background: 'linear-gradient(180deg, #061018 0%, #0c1d2a 100%)',
   fontFamily: 'Arial, sans-serif',
+  color: '#ffffff',
+  boxSizing: 'border-box',
+};
+
+const dashboardContentStyle = {
+  display: 'grid',
+  gridTemplateColumns: '280px minmax(0, 1fr)',
+  gap: '18px',
+  alignItems: 'start',
 };
 
 const columnStyle = {
   display: 'flex',
   flexDirection: 'column',
-  gap: '15px',
-};
-
-const gaugeTitleStyle = {
-  fontSize: '40px',
-  marginTop: '20px',
-  textAlign: 'center',
-  color: '#fff',
-  fontFamily: 'MW Font',
-  fontWeight: 'bold',
-  borderTop: '1px solid #fff',
-};
-
-const centerGaugeStyle = {
-  width: '100%',
-  height: '250px',
-};
-
-// Grid layout styles for the dashboard
-const gridStyle = {
-  display: 'grid',
-  gridTemplateColumns: '25% 50% 25%',
-  gridGap: '15px',
-  boxSizing: 'border-box',
+  gap: '16px',
 };
 
 const centerColumnStyle = {
   display: 'flex',
   flexDirection: 'column',
-  gap: '5px',
-  boxSizing: 'border-box',
-  borderRight: '1px solid #fff',
-  borderLeft: '1px solid #fff',
+  gap: '16px',
 };
 
-const centerGaugeGridStyle = {
+const panelCardStyle = {
+  background: 'rgba(9, 25, 38, 0.92)',
+  border: '1px solid rgba(126, 171, 201, 0.25)',
+  borderRadius: '18px',
+  padding: '18px',
+  boxShadow: '0 14px 28px rgba(0, 0, 0, 0.18)',
+};
+
+const headerCardStyle = {
+  ...panelCardStyle,
+  paddingBottom: '14px',
+};
+
+const cardTitleStyle = {
+  fontSize: '24px',
+  fontWeight: 'bold',
+  fontFamily: 'MW Font, Arial, sans-serif',
+  marginBottom: '14px',
+};
+
+const controlPanelStyle = {
+  ...panelCardStyle,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '12px',
+  position: 'sticky',
+  top: '20px',
+};
+
+const controlPanelHeaderStyle = {
+  fontSize: '22px',
+  fontWeight: 'bold',
+  fontFamily: 'MW Font, Arial, sans-serif',
+  marginBottom: '4px',
+};
+
+const baseButtonStyle = {
+  border: 'none',
+  borderRadius: '12px',
+  padding: '14px 18px',
+  fontSize: '18px',
+  fontFamily: 'MW Font, Arial, sans-serif',
+  fontWeight: 'bold',
+  cursor: 'pointer',
+  transition: 'transform 0.2s ease',
+};
+
+const primaryButtonStyle = {
+  ...baseButtonStyle,
+  backgroundColor: '#2e8b57',
+  color: '#03150d',
+};
+
+const secondaryButtonStyle = {
+  ...baseButtonStyle,
+  backgroundColor: '#d08c2e',
+  color: '#1c1203',
+};
+
+const dangerButtonStyle = {
+  ...baseButtonStyle,
+  backgroundColor: '#8b2020',
+  color: '#ffffff',
+};
+
+const sliderCardStyle = {
+  marginTop: '8px',
+  padding: '14px',
+  borderRadius: '14px',
+  background: 'rgba(255, 255, 255, 0.04)',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+};
+
+const sliderStyle = {
+  width: '100%',
+  marginTop: '10px',
+};
+
+const stateMetaGridStyle = {
   display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: '2px',
-  maxWidth: '100%',
-  boxSizing: 'border-box',
+  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+  gap: '12px',
 };
 
-const gaugeContainerStyle = {
+const smallInfoCardStyle = {
+  background: 'rgba(255, 255, 255, 0.04)',
+  borderRadius: '14px',
+  padding: '12px 14px',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+};
+
+const smallInfoLabelStyle = {
+  fontSize: '12px',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  opacity: 0.7,
+};
+
+const smallInfoValueStyle = {
+  fontSize: '24px',
+  fontWeight: 'bold',
+  marginTop: '6px',
+  fontFamily: 'MW Font, Arial, sans-serif',
+};
+
+const topTelemetryGridStyle = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+  gap: '16px',
+  alignItems: 'stretch',
+};
+
+const sideTelemetryStackStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+};
+
+const metricCardLabelStyle = {
+  fontSize: '13px',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  opacity: 0.7,
+};
+
+const metricCardValueStyle = {
+  fontSize: '34px',
+  fontWeight: 'bold',
+  marginTop: '10px',
+  fontFamily: 'MW Font, Arial, sans-serif',
+};
+
+const temperatureBarChartStyle = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(12, minmax(0, 1fr))',
+  gap: '10px',
+  alignItems: 'end',
+  minHeight: '320px',
+};
+
+const temperatureBarColumnStyle = {
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
+  gap: '10px',
 };
 
-// Right column grid for the four smaller glow plug gauges
-const rightBottomGaugeGridStyle = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: '5px',
+const temperatureBarTrackStyle = {
   width: '100%',
-  boxSizing: 'border-box',
+  height: '220px',
+  display: 'flex',
+  alignItems: 'flex-end',
+  justifyContent: 'center',
+  padding: '6px',
+  background: 'linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, rgba(255, 255, 255, 0.08) 100%)',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  borderRadius: '14px',
 };
 
-/* --- Right Column Specific Styles --- */
-// Big gauges (half size of center gauges – approx 125px high)
-const rightLargeGaugeStyle = {
+const temperatureBarFillStyle = {
   width: '100%',
-  height: '125px',
+  borderRadius: '10px',
+  background: 'linear-gradient(180deg, #73ff9d 0%, #f5cd19 55%, #ea4228 100%)',
+  boxShadow: '0 8px 24px rgba(234, 66, 40, 0.18)',
 };
 
-const rightLargeValueLabelStyle = {
-  fontSize: '25px',
-  color: '#fff',
-  fontFamily: 'MW Font',
-  fontWeight: 'bold',
-};
-
-const rightLargeTickLabelStyle = {
-  fontSize: '10px',
-  color: '#fff',
-  fontFamily: 'MW Font',
-  fontWeight: 'bold',
-};
-
-const rightLargeGaugeTitleStyle = {
-  fontSize: '20px',
-  marginTop: '10px',
+const temperatureBarLabelStyle = {
+  fontSize: '13px',
+  textTransform: 'uppercase',
+  letterSpacing: '0.06em',
+  opacity: 0.72,
   textAlign: 'center',
-  color: '#fff',
-  fontFamily: 'MW Font',
+};
+
+const temperatureBarValueStyle = {
+  fontSize: '16px',
   fontWeight: 'bold',
-  borderTop: '1px solid #fff',
+  fontFamily: 'MW Font, Arial, sans-serif',
+  textAlign: 'center',
 };
 
-// Small gauges (quarter size of center gauges – approx 62px high)
-const rightSmallGaugeStyle = {
+const mediumGaugeStyle = {
   width: '100%',
-  height: '62px',
+  minHeight: '220px',
 };
 
-const rightSmallValueLabelStyle = {
+const mediumTickLabelStyle = {
   fontSize: '12px',
-  color: '#fff',
-  fontFamily: 'MW Font',
+  color: '#ffffff',
+  fontFamily: 'MW Font, Arial, sans-serif',
   fontWeight: 'bold',
 };
 
-const rightSmallTickLabelStyle = {
-  fontSize: '6px',
-  color: '#fff',
-  fontFamily: 'MW Font',
+const mediumValueLabelStyle = {
+  fontSize: '24px',
+  color: '#ffffff',
+  fontFamily: 'MW Font, Arial, sans-serif',
   fontWeight: 'bold',
-};
-
-const rightSmallGaugeTitleStyle = {
-  fontSize: '15px',
-  marginTop: '10px',
-  textAlign: 'center',
-  color: '#fff',
-  fontFamily: 'MW Font',
-  fontWeight: 'bold',
-  borderTop: '1px solid #fff',
 };
 
 export default EngineDashboard;
