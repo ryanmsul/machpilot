@@ -1,9 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import GaugeComponent from 'react-gauge-component';
 import * as ROSLIB from 'roslib';
 import ros from '../rosConnection';
 import useROSSubscription from '../useROSSubscription';
 
+const MAX_TEMPERATURE_KELVIN = 2000;
+const TEMPERATURE_BAR_MAX_KELVIN = 2500;
 const TEMP_FIELD_HINTS = ['temp', 'temperature', 'egt', 'therm'];
 const THROAT_FIELD_CANDIDATES = [
   'throat_area',
@@ -133,6 +135,9 @@ const formatPressure = (value) => {
   return `${value.toFixed(0)} mbar`;
 };
 
+const celsiusToKelvin = (value) => value + 273.15;
+const kelvinToCelsius = (value) => value - 273.15;
+
 const EngineDashboard = () => {
   const engineData = useROSSubscription('/h20pro/engine_data', 'interfaces/msg/EngineData');
   const pumpRpm = useROSSubscription('/h20pro/pump_rpm', 'interfaces/msg/engine_data2');
@@ -178,11 +183,15 @@ const EngineDashboard = () => {
     timeout: 5,
   });
 
-  const killService = new ROSLIB.Service({
-    ros,
-    name: '/h20pro/kill',
-    serviceType: 'std_srvs/srv/Trigger',
-  });
+  const killService = useMemo(
+    () =>
+      new ROSLIB.Service({
+        ros,
+        name: '/h20pro/kill',
+        serviceType: 'std_srvs/srv/Trigger',
+      }),
+    []
+  );
 
   const stateName = engineData ? engineData.state_name : 'UNKNOWN';
   const fuelFlow = fuelAmbient ? fuelAmbient.fuel_flow : 0;
@@ -252,6 +261,20 @@ const EngineDashboard = () => {
   const [isKilling, setIsKilling] = useState(false);
   const [killButtonText, setKillButtonText] = useState('Kill Engine');
   const [throttleValue, setThrottleValue] = useState(0);
+  const [useSimulatedTemperatures, setUseSimulatedTemperatures] = useState(false);
+  const [simulatedTemperatureCelsius, setSimulatedTemperatureCelsius] = useState(kelvinToCelsius(300));
+  const hasTriggeredOvertempKill = useRef(false);
+
+  const displayedTemperatureSensors = useMemo(() => {
+    if (!useSimulatedTemperatures) {
+      return temperatureSensors;
+    }
+
+    return temperatureSensors.map((sensor) => ({
+      ...sensor,
+      value: simulatedTemperatureCelsius,
+    }));
+  }, [simulatedTemperatureCelsius, temperatureSensors, useSimulatedTemperatures]);
 
   const startTestButton = () => {
     setIsRunningStartTest(true);
@@ -311,11 +334,47 @@ const EngineDashboard = () => {
     });
   };
 
+  useEffect(() => {
+    const hottestTemperatureCelsius = displayedTemperatureSensors.reduce((maxValue, sensor) => {
+      if (typeof sensor.value !== 'number' || !Number.isFinite(sensor.value)) {
+        return maxValue;
+      }
+
+      return Math.max(maxValue, sensor.value);
+    }, -Infinity);
+
+    const hottestTemperatureKelvin =
+      hottestTemperatureCelsius === -Infinity ? null : celsiusToKelvin(hottestTemperatureCelsius);
+
+    if (hottestTemperatureKelvin !== null && hottestTemperatureKelvin >= MAX_TEMPERATURE_KELVIN) {
+      if (!hasTriggeredOvertempKill.current && !isKilling) {
+        hasTriggeredOvertempKill.current = true;
+        setIsKilling(true);
+        setKillButtonText(`Auto Kill @ ${MAX_TEMPERATURE_KELVIN} K`);
+
+        killService.callService({}, () => {
+          setIsKilling(false);
+          setKillButtonText('Kill Engine');
+        });
+      }
+
+      return;
+    }
+
+    hasTriggeredOvertempKill.current = false;
+  }, [displayedTemperatureSensors, isKilling, killService]);
+
   const handleThrottleChange = (event) => {
     const newValue = parseFloat(event.target.value);
     setThrottleValue(newValue);
     throttlePublisher.publish({ data: newValue });
   };
+
+  const handleSimulatedTemperatureChange = (event) => {
+    setSimulatedTemperatureCelsius(parseFloat(event.target.value));
+  };
+
+  const simulatedTemperatureKelvin = celsiusToKelvin(simulatedTemperatureCelsius);
 
   const stateHeaderStyle = {
     ...cardTitleStyle,
@@ -354,6 +413,32 @@ const EngineDashboard = () => {
                 onChange={handleThrottleChange}
                 style={sliderStyle}
               />
+            </div>
+            <div style={sliderCardStyle}>
+              <div style={metricCardLabelStyle}>Temperature Simulation</div>
+              <div style={smallInfoValueStyle}>{useSimulatedTemperatures ? 'Enabled' : 'Disabled'}</div>
+              <button
+                onClick={() => setUseSimulatedTemperatures((currentValue) => !currentValue)}
+                style={useSimulatedTemperatures ? dangerButtonStyle : secondaryButtonStyle}
+              >
+                {useSimulatedTemperatures ? 'Disable Temp Sim' : 'Enable Temp Sim'}
+              </button>
+              <div style={metricCardLabelStyle}>Injected Sensor Value</div>
+              <div style={metricCardValueStyle}>
+                {formatNumber(simulatedTemperatureCelsius, 0)} C / {formatNumber(simulatedTemperatureKelvin, 0)} K
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="2000"
+                step="10"
+                value={simulatedTemperatureCelsius}
+                onChange={handleSimulatedTemperatureChange}
+                style={sliderStyle}
+              />
+              <div style={simulationHintStyle}>
+                Auto-kill trips at {MAX_TEMPERATURE_KELVIN} K ({formatNumber(kelvinToCelsius(MAX_TEMPERATURE_KELVIN), 0)} C).
+              </div>
             </div>
           </div>
         </div>
@@ -491,14 +576,20 @@ const EngineDashboard = () => {
           <div style={panelCardStyle}>
             <div style={cardTitleStyle}>Temperature Sensors</div>
             <div style={temperatureBarChartStyle}>
-              {temperatureSensors.map((sensor) => (
+              {displayedTemperatureSensors.map((sensor) => (
                 <div key={sensor.label} style={temperatureBarColumnStyle}>
                   <div style={temperatureBarValueStyle}>{formatTemperature(sensor.value)}</div>
                   <div style={temperatureBarTrackStyle}>
                     <div
                       style={{
                         ...temperatureBarFillStyle,
-                        height: `${Math.max(4, Math.min(((sensor.value ?? 0) / 1200) * 100, 100))}%`,
+                        height: `${Math.max(
+                          4,
+                          Math.min(
+                            ((sensor.value ?? 0) / kelvinToCelsius(TEMPERATURE_BAR_MAX_KELVIN)) * 100,
+                            100
+                          )
+                        )}%`,
                         opacity: sensor.value !== null ? 1 : 0.3,
                       }}
                     />
@@ -507,6 +598,11 @@ const EngineDashboard = () => {
                 </div>
               ))}
             </div>
+            {useSimulatedTemperatures ? (
+              <div style={simulationHintStyle}>
+                Simulated temperatures are active. All temperature bars are using the injected test value.
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -720,6 +816,14 @@ const temperatureBarValueStyle = {
   fontWeight: 'bold',
   fontFamily: 'MW Font, Arial, sans-serif',
   textAlign: 'center',
+};
+
+const simulationHintStyle = {
+  marginTop: '10px',
+  fontSize: '13px',
+  lineHeight: 1.4,
+  color: '#9fc3d9',
+  textAlign: 'left',
 };
 
 const mediumGaugeStyle = {
